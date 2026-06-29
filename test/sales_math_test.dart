@@ -13,4 +13,11 @@ void main() {
   test('available = opening + delivered', () {
     expect(computeSold(opening: 0, delivered: 930, closing: 930), 0);
   });
+
+  test('cash 1000 + coins 200, no expenses, sales 1935 -> -735 (short)', () {
+  expect(
+    computeDiscrepancy(cash: 1000, coins: 200, expenses: 0, sales: 1935),
+    -735,
+  );
+});
 }

@@ -51,6 +51,21 @@ class SalesService {
       deliveredBy[pid] = (deliveredBy[pid] ?? 0) + (toNum(r['quantity_in_units']) ?? 0);
     }
 
+    // Night baton: night opening = that date's DAY closing.
+    final dayClosings = <String, num>{};
+    if (shift == 'night') {
+      final dayRows = await supabase
+          .from('end_of_day_sale')
+          .select('product_id, closing_stock')
+          .eq('branch_id', branchId)
+          .eq('sale_date', date)
+          .eq('shift', 'day');
+      for (final r in dayRows) {
+        final c = toNum(r['closing_stock']);
+        if (c != null) dayClosings[r['product_id'] as String] = c;
+      }
+    }
+
     final stock = await stockService.mapForBranch(branchId);
 
     final lines = <WorksheetLine>[];
@@ -61,6 +76,8 @@ class SalesService {
       num opening;
       if (saved != null && saved['opening_stock'] != null) {
         opening = toNum(saved['opening_stock']) ?? 0; // explicit saved row wins
+      } else if (shift == 'night' && dayClosings.containsKey(p.id)) {
+        opening = dayClosings[p.id]!; // baton: night opening = day closing
       } else {
         // auto: live stock minus this shift's deliveries (don't double-count)
         final live = stock[p.id]?.quantity ?? 0;
@@ -107,6 +124,23 @@ class SalesService {
       await stockService.setQuantity(
         productId: s.productId, branchId: branchId, quantity: s.closing);
     }
+  }
+  /// Admin override: set explicit opening for a product/date/shift.
+  Future<void> setOpening({
+    required String productId,
+    required String branchId,
+    required String date,
+    required String shift,
+    required num opening,
+  }) async {
+    await supabase.from('end_of_day_sale').upsert({
+      'product_id': productId,
+      'branch_id': branchId,
+      'sale_date': date,
+      'shift': shift,
+      'opening_stock': opening,
+      'updated_at': DateTime.now().toIso8601String(),
+    }, onConflict: 'product_id,sale_date,shift');
   }
 
   String today() => DateFormat('yyyy-MM-dd').format(DateTime.now());

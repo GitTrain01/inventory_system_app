@@ -1,63 +1,90 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../services/auth_service.dart';
+import 'package:intl/intl.dart';
+import '../../core/theme.dart';
+import '../../services/dashboard_service.dart';
 import '../../state/active_branch_provider.dart';
-import '../../state/profile_provider.dart';
-import '../stock/stock_screen.dart';
-import '../delivery/delivery_confirm_screen.dart';
-import '../sales/sales_worksheet_screen.dart';
+import '../../widgets/app_drawer.dart';
+import '../../widgets/dashboard_cards.dart';
+import '../../widgets/stock_item_list.dart';
 
-class StaffDashboard extends ConsumerWidget {
+class StaffDashboard extends ConsumerStatefulWidget {
   const StaffDashboard({super.key});
+  @override
+  ConsumerState<StaffDashboard> createState() => _State();
+}
+
+class _State extends ConsumerState<StaffDashboard> {
+  bool _loading = true;
+  StockSummary _stock = const StockSummary();
+  String? _lastBranchId;
+
+  Future<void> _load() async {
+    final branch = ref.read(activeBranchProvider);
+    if (branch == null) { setState(() => _loading = false); return; }
+    setState(() => _loading = true);
+    final stock = await dashboardService.stockSummary(branch.id);
+    if (mounted) setState(() { _stock = stock; _loading = false; });
+  }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final branch = ref.watch(activeBranchProvider);
-    final profile = ref.watch(profileProvider).value;
-    final canDeliver = profile?.canAccessDelivery ?? false;
+
+    if (branch != null && branch.id != _lastBranchId) {
+      _lastBranchId = branch.id;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+    }
 
     return Scaffold(
+      drawer: const AppDrawer(current: NavKey.dashboard),
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        centerTitle: true,
+        title: Text('4C SnackHouse ${branch?.name ?? ''}',
+            style: const TextStyle(
+                color: AppColors.brickRed, fontWeight: FontWeight.bold, fontSize: 16)),
+        actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: _load)],
+      ),
+      body: RefreshIndicator(
+        onRefresh: _load,
+        child: ListView(
           children: [
-            const Text('Staff Dashboard'),
-            if (branch != null) Text(branch.name, style: const TextStyle(fontSize: 12)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Staff Dashboard',
+                      style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
+                  Text(DateFormat('EEEE, MMMM d, yyyy').format(DateTime.now()),
+                      style: const TextStyle(color: Colors.grey)),
+                ],
+              ),
+            ),
+            StockSummaryCard(s: _stock, showValue: false, loading: _loading),
+            const Divider(height: 24),
+            const _SectionTile(title: 'Saleable Items', consumable: false),
+            const _SectionTile(title: 'Consumable Items', consumable: true),
+            const SizedBox(height: 24),
           ],
         ),
-        actions: [
-          IconButton(icon: const Icon(Icons.logout), onPressed: authService.signOut),
-        ],
       ),
-      body: ListView(
-        children: [
-          ListTile(
-            leading: const Icon(Icons.warehouse_outlined),
-            title: const Text('Live Stock'),
-            subtitle: Text(branch == null ? '' : 'Counting for ${branch.name}'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => Navigator.push(
-              context, MaterialPageRoute(builder: (_) => const StockScreen())),
-          ),
-          if (canDeliver)
-            ListTile(
-              leading: const Icon(Icons.local_shipping_outlined),
-              title: const Text('Confirm Delivery'),
-              subtitle: const Text('Any branch'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.push(
-                context, MaterialPageRoute(builder: (_) => const DeliveryConfirmScreen())),
-            ),
-          ListTile(
-              leading: const Icon(Icons.point_of_sale_outlined),
-              title: const Text('Sales Worksheet'),
-              subtitle: const Text('Enter closing counts'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.push(
-                context, MaterialPageRoute(builder: (_) => const SalesWorksheetScreen())),
-            ),
-        ],
-      ),
+    );
+  }
+}
+
+class _SectionTile extends StatelessWidget {
+  final String title;
+  final bool consumable;
+  const _SectionTile({required this.title, required this.consumable});
+
+  @override
+  Widget build(BuildContext context) {
+    return ExpansionTile(
+      title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+      initiallyExpanded: !consumable,
+      childrenPadding: EdgeInsets.zero,
+      children: [StockItemList(consumable: consumable, showValue: false)],
     );
   }
 }

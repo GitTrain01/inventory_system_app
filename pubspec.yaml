@@ -38,6 +38,9 @@ dependencies:
   flutter_riverpod: ^3.3.2
   go_router: ^17.3.0
   intl: ^0.20.3
+  shared_preferences: ^2.5.5
+  flutter_animate: ^4.5.2
+  skeletonizer: ^2.1.3
 
 dev_dependencies:
   flutter_test:

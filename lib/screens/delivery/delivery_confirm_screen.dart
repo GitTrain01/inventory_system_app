@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/formatters.dart';
 import '../../models/delivery_plan.dart';
 import '../../models/delivery_plan_item.dart';
@@ -28,7 +29,13 @@ class _State extends ConsumerState<DeliveryConfirmScreen> {
   List<DeliveryPlanItem> _items = [];
   Map<String, Product> _productsById = {};
 
+  // Loading-checklist state, persisted per branch+date+shift on this device.
+  final Set<String> _loaded = {};
+
   String get _dateStr => DateFormat('yyyy-MM-dd').format(_date);
+
+  /// Storage key isolates each branch/date/shift's checklist.
+  String get _prefsKey => 'delivery_prep_${_branchId}_${_dateStr}_$_shift';
 
   String _branchName() {
     final branches = ref.read(branchesProvider).value ?? const [];
@@ -36,6 +43,28 @@ class _State extends ConsumerState<DeliveryConfirmScreen> {
       if (b.id == _branchId) return b.name;
     }
     return 'this branch';
+  }
+
+  Future<void> _loadChecklist() async {
+    if (_branchId == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getStringList(_prefsKey) ?? const [];
+    _loaded
+      ..clear()
+      ..addAll(saved);
+  }
+
+  Future<void> _saveChecklist() async {
+    if (_branchId == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_prefsKey, _loaded.toList());
+  }
+
+  Future<void> _clearChecklist() async {
+    if (_branchId == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_prefsKey);
+    _loaded.clear();
   }
 
   Future<void> _load() async {
@@ -50,12 +79,35 @@ class _State extends ConsumerState<DeliveryConfirmScreen> {
         final products = await productsService.listForBranch(_branchId!);
         map = {for (final p in products) p.id: p};
       }
+      await _loadChecklist(); // restore saved ticks for this branch/date/shift
       setState(() { _plan = plan; _items = items; _productsById = map; });
     } catch (e) {
       setState(() => _error = 'Load failed: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  Future<void> _toggle(String productId) async {
+    setState(() {
+      if (_loaded.contains(productId)) {
+        _loaded.remove(productId);
+      } else {
+        _loaded.add(productId);
+      }
+    });
+    await _saveChecklist();
+  }
+
+  Future<void> _setAll(bool loaded) async {
+    setState(() {
+      if (loaded) {
+        _loaded.addAll(_items.map((e) => e.productId));
+      } else {
+        _loaded.clear();
+      }
+    });
+    await _saveChecklist();
   }
 
   Future<void> _pickDate() async {
@@ -68,12 +120,16 @@ class _State extends ConsumerState<DeliveryConfirmScreen> {
   Future<void> _confirm() async {
     final plan = _plan;
     if (plan == null) return;
+
+    final notLoaded = _items.where((it) => !_loaded.contains(it.productId)).length;
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Confirm delivery?'),
         content: Text(
-            'Adds the planned quantities to ${_branchName()} stock and marks the plan delivered.'),
+          'Adds the planned quantities to ${_branchName()} stock and marks the plan delivered.'
+          '${notLoaded > 0 ? '\n\n⚠️ $notLoaded item(s) are still unchecked (not marked loaded).' : ''}',
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
           FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Confirm')),
@@ -86,6 +142,7 @@ class _State extends ConsumerState<DeliveryConfirmScreen> {
     try {
       await deliveryService.confirmDelivery(
           plan: plan, items: _items, productsById: _productsById, shift: _shift);
+      await _clearChecklist(); // load done — wipe this checklist
       ref.invalidate(stockMapProvider);
       ref.invalidate(deliveryPlansProvider);
       await _load();
@@ -138,7 +195,7 @@ class _State extends ConsumerState<DeliveryConfirmScreen> {
                         ButtonSegment(value: 'night', label: Text('Night')),
                       ],
                       selected: {_shift},
-                      onSelectionChanged: (s) => setState(() => _shift = s.first),
+                      onSelectionChanged: (s) { setState(() => _shift = s.first); _load(); },
                     ),
                   ],
                 ),
@@ -166,6 +223,10 @@ class _State extends ConsumerState<DeliveryConfirmScreen> {
       return Center(child: Text(
           'No plan for ${_branchName()} on ${DateFormat('MMM d').format(_date)}.'));
     }
+
+    final loadedCount = _items.where((it) => _loaded.contains(it.productId)).length;
+    final allLoaded = _items.isNotEmpty && loadedCount == _items.length;
+
     return Column(
       children: [
         if (delivered)
@@ -175,6 +236,24 @@ class _State extends ConsumerState<DeliveryConfirmScreen> {
             padding: const EdgeInsets.all(12),
             child: const Text('✓ Already delivered', textAlign: TextAlign.center),
           ),
+
+        if (!delivered && _items.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 8, 0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text('Loaded $loadedCount of ${_items.length}',
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                ),
+                TextButton(
+                  onPressed: () => _setAll(!allLoaded),
+                  child: Text(allLoaded ? 'Clear all' : 'Check all'),
+                ),
+              ],
+            ),
+          ),
+
         Expanded(
           child: ListView.separated(
             itemCount: _items.length,
@@ -186,13 +265,33 @@ class _State extends ConsumerState<DeliveryConfirmScreen> {
               final du = (p?.deliveryUnit?.isNotEmpty ?? false)
                   ? p!.deliveryUnit! : (p?.unit ?? 'units');
               final bu = p?.unit ?? 'pc';
+              final isLoaded = _loaded.contains(it.productId);
+
               return ListTile(
-                title: Text(name),
+                onTap: delivered ? null : () => _toggle(it.productId),
+                leading: delivered
+                    ? const Icon(Icons.check_circle, color: Colors.green)
+                    : Icon(
+                        isLoaded ? Icons.check_circle : Icons.radio_button_unchecked,
+                        color: isLoaded ? Colors.green : Colors.grey,
+                      ),
+                title: Text(
+                  name,
+                  style: TextStyle(
+                    decoration: isLoaded && !delivered ? TextDecoration.lineThrough : null,
+                    color: isLoaded && !delivered ? Colors.grey : null,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
                 subtitle: Text('${qty(it.plannedQty)} $du  →  ${qty(it.quantityInUnits)} $bu'),
+                tileColor: isLoaded && !delivered
+                    ? Colors.green.withValues(alpha: 0.06)
+                    : null,
               );
             },
           ),
         ),
+
         if (!delivered)
           SafeArea(
             child: Padding(

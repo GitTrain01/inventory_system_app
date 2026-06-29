@@ -28,21 +28,25 @@ class StockService {
   }
 
   /// Add to (or subtract from) the current quantity. Creates the row if missing.
-  Future<void> increment({
-    required String productId,
-    required String branchId,
-    required num delta,
-  }) async {
-    final existing = await supabase
-        .from('live_stock')
-        .select('quantity')
-        .eq('product_id', productId)
-        .eq('branch_id', branchId)
-        .maybeSingle();
-    final current = existing == null ? 0 : (toNum(existing['quantity']) ?? 0);
-    await setQuantity(
-        productId: productId, branchId: branchId, quantity: current + delta);
+  /// Add to (or subtract from) the current quantity. Creates the row if missing.
+  /// Floored at 0 so a downward correction can't go negative.
+    Future<void> increment({
+      required String productId,
+      required String branchId,
+      required num delta,
+    }) async {
+      final existing = await supabase
+          .from('live_stock')
+          .select('quantity')
+          .eq('product_id', productId)
+          .eq('branch_id', branchId)
+          .maybeSingle();
+      final current = existing == null ? 0 : (toNum(existing['quantity']) ?? 0);
+      final next = current + delta;
+      await setQuantity(
+          productId: productId, branchId: branchId,
+          quantity: next < 0 ? 0 : next);
+    }
   }
-}
 
 final stockService = StockService();

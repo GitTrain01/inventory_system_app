@@ -64,6 +64,9 @@ class ProductsService {
       'updated_at': DateTime.now().toIso8601String(),
     }).eq('id', id);
   }
+    Future<void> delete(String id) async {
+    await supabase.from('products').delete().eq('id', id);
+  }
 }
 
 final productsService = ProductsService();

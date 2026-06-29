@@ -2,17 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../../core/conversion.dart';
-import '../../core/formatters.dart';
 import '../../models/product.dart';
 import '../../services/delivery_service.dart';
 import '../../state/active_branch_provider.dart';
 import '../../state/catalog_providers.dart';
 import '../../state/stock_providers.dart';
+import '../../widgets/subcategory_filter.dart';
 
 class DeliveryPlanEditorScreen extends ConsumerStatefulWidget {
   final DateTime date;
   const DeliveryPlanEditorScreen({super.key, required this.date});
-
   @override
   ConsumerState<DeliveryPlanEditorScreen> createState() => _EditorState();
 }
@@ -20,14 +19,14 @@ class DeliveryPlanEditorScreen extends ConsumerStatefulWidget {
 class _EditorState extends ConsumerState<DeliveryPlanEditorScreen> {
   late DateTime _date;
   final _notes = TextEditingController();
-  final Map<String, TextEditingController> _qty = {}; // productId -> planned_qty
+  final Map<String, TextEditingController> _qty = {};
+  String _filter = 'All';
   bool _loading = true;
   bool _saving = false;
   String? _error;
 
   String get _dateStr => DateFormat('yyyy-MM-dd').format(_date);
-  TextEditingController _ctrl(String id) =>
-      _qty.putIfAbsent(id, () => TextEditingController());
+  TextEditingController _ctrl(String id) => _qty.putIfAbsent(id, () => TextEditingController());
 
   @override
   void initState() {
@@ -70,11 +69,8 @@ class _EditorState extends ConsumerState<DeliveryPlanEditorScreen> {
 
   Future<void> _pickDate() async {
     final picked = await showDatePicker(
-      context: context,
-      initialDate: _date,
-      firstDate: DateTime(2024),
-      lastDate: DateTime(2030),
-    );
+      context: context, initialDate: _date,
+      firstDate: DateTime(2024), lastDate: DateTime(2030));
     if (picked != null) {
       setState(() => _date = picked);
       await _loadExisting();
@@ -85,6 +81,7 @@ class _EditorState extends ConsumerState<DeliveryPlanEditorScreen> {
     final branch = ref.read(activeBranchProvider);
     if (branch == null) return;
 
+    // Save iterates ALL products with a typed quantity, not the filtered view.
     final items = <({String productId, num plannedQty, num quantityInUnits})>[];
     for (final p in products) {
       final txt = _qty[p.id]?.text.trim() ?? '';
@@ -142,26 +139,39 @@ class _EditorState extends ConsumerState<DeliveryPlanEditorScreen> {
               error: (e, _) => Center(child: Text('Error: $e')),
               data: (products) {
                 final active = products.where((p) => p.isActive).toList();
+                final subs = distinctSubcategories(active.map((p) => p.subcategory));
+                final visible = active
+                    .where((p) => matchesSubFilter(p.subcategory, _filter))
+                    .toList();
                 return Column(
                   children: [
-                    Expanded(
-                      child: ListView(
-                        padding: const EdgeInsets.all(16),
-                        children: [
-                          TextField(
-                            controller: _notes,
-                            decoration: const InputDecoration(labelText: 'Notes (optional)'),
-                          ),
-                          const SizedBox(height: 8),
-                          for (final p in active)
-                            _ProductRow(
-                              product: p,
-                              controller: _ctrl(p.id),
-                              onHandPc: stock[p.id]?.quantity ?? 0,
-                              onChanged: () => setState(() {}),
-                            ),
-                        ],
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                      child: TextField(
+                        controller: _notes,
+                        decoration: const InputDecoration(labelText: 'Notes (optional)'),
                       ),
+                    ),
+                    SubcategoryFilterBar(
+                      subcategories: subs,
+                      selected: _filter,
+                      onSelected: (s) => setState(() => _filter = s),
+                    ),
+                    Expanded(
+                      child: visible.isEmpty
+                          ? const Center(child: Text('No products in this sub-category.'))
+                          : ListView(
+                              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                              children: [
+                                for (final p in visible)
+                                  _ProductRow(
+                                    product: p,
+                                    controller: _ctrl(p.id),
+                                    onHandPc: stock[p.id]?.quantity ?? 0,
+                                    onChanged: () => setState(() {}),
+                                  ),
+                              ],
+                            ),
                     ),
                     if (_error != null)
                       Padding(
@@ -199,6 +209,8 @@ class _ProductRow extends StatelessWidget {
     required this.onChanged,
   });
 
+  String _qtyStr(num n) => n == n.roundToDouble() ? n.toInt().toString() : n.toString();
+
   @override
   Widget build(BuildContext context) {
     final p = product;
@@ -210,14 +222,14 @@ class _ProductRow extends StatelessWidget {
     if (p.hasDeliveryUnit) {
       final s = splitDelivery(onHandPc, p.deliveryConversion);
       onHand =
-          'On hand: ${s.deliveryWhole} ${p.deliveryUnit} + ${qty(s.baseRemainder)} ${p.unit}  (${qty(onHandPc)} ${p.unit})';
+          'On hand: ${s.deliveryWhole} ${p.deliveryUnit} + ${_qtyStr(s.baseRemainder)} ${p.unit}  (${_qtyStr(onHandPc)} ${p.unit})';
     } else {
-      onHand = 'On hand: ${qty(onHandPc)} ${p.unit}';
+      onHand = 'On hand: ${_qtyStr(onHandPc)} ${p.unit}';
     }
 
     final planned = num.tryParse(controller.text.trim());
     final preview = (planned != null && planned > 0)
-        ? '= ${qty(deliveryToBase(planned, p.deliveryConversion))} ${p.unit}'
+        ? '= ${_qtyStr(deliveryToBase(planned, p.deliveryConversion))} ${p.unit}'
         : '';
 
     return Padding(

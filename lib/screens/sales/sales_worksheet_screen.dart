@@ -10,6 +10,8 @@ import '../../services/logic/sales_math.dart';
 import '../../state/active_branch_provider.dart';
 import '../../state/profile_provider.dart';
 import '../../state/stock_providers.dart';
+import '../../widgets/subcategory_filter.dart';
+import '../../widgets/skeleton_list.dart';
 
 class SalesWorksheetScreen extends ConsumerStatefulWidget {
   const SalesWorksheetScreen({super.key});
@@ -19,23 +21,44 @@ class SalesWorksheetScreen extends ConsumerStatefulWidget {
 
 class _State extends ConsumerState<SalesWorksheetScreen> {
   DateTime _date = DateTime.now();
-  String _shift = 'day';
+  String? _shift;
+  String _filter = 'All';
   bool _loading = true;
   bool _submitting = false;
+  bool _submitted = false;
   String? _error;
   List<WorksheetLine> _lines = [];
 
-  final Map<String, TextEditingController> _deliv = {}; // pack/kg box
-  final Map<String, TextEditingController> _base = {};   // pc box
+  final Map<String, TextEditingController> _deliv = {};
+  final Map<String, TextEditingController> _base = {};
   final Map<String, bool> _low = {};
 
   String get _dateStr => DateFormat('yyyy-MM-dd').format(_date);
   TextEditingController _dCtrl(String id) => _deliv.putIfAbsent(id, () => TextEditingController());
   TextEditingController _bCtrl(String id) => _base.putIfAbsent(id, () => TextEditingController());
 
+  bool get _nightMode => ref.read(activeBranchProvider)?.nightShiftEnabled ?? false;
+  bool get _isAdmin => ref.read(profileProvider).value?.isAdmin ?? false;
+  bool get _readOnly => !_isAdmin && _submitted;
+
   @override
   void initState() {
     super.initState();
+    if (_nightMode) {
+      _shift = null;
+    } else {
+      _shift = 'day';
+      _load();
+    }
+  }
+
+  void _onShiftPicked(String shift) {
+    setState(() {
+      _shift = shift;
+      _date = shift == 'night'
+          ? DateTime.now().subtract(const Duration(days: 1))
+          : DateTime.now();
+    });
     _load();
   }
 
@@ -48,12 +71,14 @@ class _State extends ConsumerState<SalesWorksheetScreen> {
   }
 
   Future<void> _load() async {
+    if (_shift == null) { setState(() => _loading = false); return; }
     final branch = ref.read(activeBranchProvider);
     if (branch == null) { setState(() => _loading = false); return; }
     setState(() { _loading = true; _error = null; });
     try {
       final lines = await salesService.getWorksheet(
-          branchId: branch.id, date: _dateStr, shift: _shift);
+          branchId: branch.id, date: _dateStr, shift: _shift!);
+      _submitted = lines.any((l) => l.existingClosing != null);
       for (final l in lines) {
         final pid = l.product.id;
         _low[pid] = l.existingLow;
@@ -78,7 +103,6 @@ class _State extends ConsumerState<SalesWorksheetScreen> {
     }
   }
 
-  /// Closing in base units for a product, or null if not counted.
   num? _closing(Product p) {
     final bTxt = _bCtrl(p.id).text.trim();
     if (p.hasDeliveryUnit) {
@@ -102,13 +126,14 @@ class _State extends ConsumerState<SalesWorksheetScreen> {
   }
 
   Future<void> _submit() async {
+    if (_shift == null) return;
     final branch = ref.read(activeBranchProvider);
     if (branch == null) return;
 
     final subs = <SalesSubmission>[];
     for (final l in _lines) {
       final closing = _closing(l.product);
-      if (closing == null) continue; // skip uncounted
+      if (closing == null) continue;
       if (closing < 0) {
         setState(() => _error = '${l.product.name}: closing can’t be negative.');
         return;
@@ -139,7 +164,7 @@ class _State extends ConsumerState<SalesWorksheetScreen> {
     setState(() { _submitting = true; _error = null; });
     try {
       await salesService.submitSales(
-          branchId: branch.id, date: _dateStr, shift: _shift, subs: subs);
+          branchId: branch.id, date: _dateStr, shift: _shift!, subs: subs);
       ref.invalidate(stockMapProvider);
       await _load();
       if (mounted) {
@@ -155,58 +180,97 @@ class _State extends ConsumerState<SalesWorksheetScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isAdmin = ref.watch(profileProvider).value?.isAdmin ?? false;
+    final isAdmin = _isAdmin;
+    final visible = _lines
+        .where((l) => matchesSubFilter(l.product.subcategory, _filter))
+        .toList();
+    final subs = distinctSubcategories(_lines.map((l) => l.product.subcategory));
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Sales Worksheet'),
         actions: [
-          TextButton.icon(
-            onPressed: _pickDate,
-            icon: const Icon(Icons.calendar_today, size: 18),
-            label: Text(DateFormat('MMM d').format(_date)),
-          ),
+          if (_shift != null)
+            TextButton.icon(
+              onPressed: _pickDate,
+              icon: const Icon(Icons.calendar_today, size: 18),
+              label: Text(DateFormat('MMM d').format(_date)),
+            ),
         ],
       ),
       body: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(value: 'day', label: Text('Day')),
-                ButtonSegment(value: 'night', label: Text('Night')),
-              ],
-              selected: {_shift},
-              onSelectionChanged: (s) { setState(() => _shift = s.first); _load(); },
+          if (_nightMode) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'day', label: Text('☀️ Day')),
+                  ButtonSegment(value: 'night', label: Text('🌙 Night')),
+                ],
+                selected: _shift == null ? <String>{} : {_shift!},
+                emptySelectionAllowed: true,
+                onSelectionChanged: (s) {
+                  if (s.isNotEmpty) _onShiftPicked(s.first);
+                },
+              ),
             ),
-          ),
+            if (_shift == 'night')
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 6, 16, 0),
+                child: Text('🌙 Night sales file under the previous day’s date.',
+                    style: TextStyle(color: Colors.grey, fontSize: 12)),
+              ),
+          ],
           const SizedBox(height: 8),
+
+          if (_readOnly)
+            Container(
+              width: double.infinity,
+              color: Colors.amber.shade100,
+              padding: const EdgeInsets.all(10),
+              child: const Text('🔒 Already submitted for this shift. Ask an admin to edit.',
+                  textAlign: TextAlign.center),
+            ),
+
+          if (_shift != null && _lines.isNotEmpty)
+            SubcategoryFilterBar(
+              subcategories: subs,
+              selected: _filter,
+              onSelected: (s) => setState(() => _filter = s),
+            ),
+
           Expanded(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : _lines.isEmpty
-                    ? const Center(child: Text('No active products.'))
-                    : ListView.separated(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        itemCount: _lines.length,
-                        separatorBuilder: (_, __) => const Divider(height: 1),
-                        itemBuilder: (_, i) => _row(_lines[i], isAdmin),
-                      ),
+            child: _shift == null
+                ? const Center(child: Text('Select ☀️ Day or 🌙 Night to begin.'))
+                : _loading
+                    ? const SkeletonList(rows: 8)
+                    : _lines.isEmpty
+                        ? const Center(child: Text('No active products.'))
+                        : visible.isEmpty
+                            ? const Center(child: Text('No products in this sub-category.'))
+                            : ListView.separated(
+                                padding: const EdgeInsets.only(bottom: 8),
+                                itemCount: visible.length,
+                                separatorBuilder: (_, __) => const Divider(height: 1),
+                                itemBuilder: (_, i) => _row(visible[i], isAdmin),
+                              ),
           ),
           if (_error != null)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Text(_error!, style: const TextStyle(color: Colors.red)),
             ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: FilledButton(
-                onPressed: _submitting || _loading ? null : _submit,
-                child: Text(_submitting ? 'Submitting…' : 'Submit sales'),
+          if (_shift != null && !_readOnly)
+            SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: FilledButton(
+                  onPressed: _submitting || _loading ? null : _submit,
+                  child: Text(_submitting ? 'Submitting…' : 'Submit sales'),
+                ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -224,6 +288,7 @@ class _State extends ConsumerState<SalesWorksheetScreen> {
             width: 90,
             child: TextField(
               controller: _dCtrl(p.id),
+              enabled: !_readOnly,
               keyboardType: const TextInputType.numberWithOptions(decimal: true),
               onChanged: (_) => setState(() {}),
               decoration: InputDecoration(isDense: true, labelText: p.deliveryUnit, border: const OutlineInputBorder()),
@@ -235,6 +300,7 @@ class _State extends ConsumerState<SalesWorksheetScreen> {
           width: 90,
           child: TextField(
             controller: _bCtrl(p.id),
+            enabled: !_readOnly,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             onChanged: (_) => setState(() {}),
             decoration: InputDecoration(isDense: true, labelText: p.unit, border: const OutlineInputBorder()),
@@ -259,7 +325,7 @@ class _State extends ConsumerState<SalesWorksheetScreen> {
                 Row(children: [
                   Checkbox(
                     value: _low[p.id] ?? false,
-                    onChanged: (v) => setState(() => _low[p.id] = v ?? false),
+                    onChanged: _readOnly ? null : (v) => setState(() => _low[p.id] = v ?? false),
                   ),
                   const Text('Low'),
                 ]),
@@ -272,7 +338,6 @@ class _State extends ConsumerState<SalesWorksheetScreen> {
       );
     }
 
-    // saleable
     final sold = (closing != null && closing <= l.available)
         ? computeSold(opening: l.opening, delivered: l.delivered, closing: closing)
         : null;
